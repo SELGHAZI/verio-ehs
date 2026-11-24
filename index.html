@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VERIO EHS COMPLIANCE</title>
+<title>VERIO</title>
 <!-- ============================================================
      OUTIL SST - GESTION SANTÉ ET SÉCURITÉ AU TRAVAIL
      Fichier unique autonome : HTML + CSS + JavaScript intégrés
@@ -1786,20 +1786,19 @@ async function forgotSearch(){
   if(!q) return;
   forgotTarget = null;
   if(SB_ON){
+    /* demande transmise automatiquement au serveur — aucune donnée confidentielle affichée */
     let j = null;
     try{
-      const r = await fetch(SB_URL + '/functions/v1/verio-login', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'lookup', login:q }) });
+      const r = await fetch(SB_URL + '/functions/v1/verio-mail', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'reset_request', login:q }) });
       j = await r.json().catch(() => ({}));
     }catch(e){ j = null; }
     $('forgotStep1').style.display = 'none';
     $('forgotStep2').style.display = '';
-    if(!j || typeof j.found === 'undefined'){ $('forgotStep2').innerHTML = '<p class="login-err">Serveur injoignable \u2014 réessayez plus tard.</p>'; return; }
-    if(!j.found){ $('forgotStep2').innerHTML = '<p class="login-err">Aucun compte ne correspond à \u00ab ' + esc(q) + ' \u00bb. Contactez votre consultant.</p>'; return; }
-    const isAdm = j.kind === 'admin';
-    const mailto = 'mailto:admin@verio.app?subject=' + encodeURIComponent('Réinitialisation de mot de passe \u2014 plateforme EHS') + '&body=' + encodeURIComponent('Bonjour,\n\nJe souhaite réinitialiser le mot de passe du compte \u00ab ' + j.login + ' \u00bb.\n\nCordialement.');
-    $('forgotStep2').innerHTML = '<div class="forgot-found">' + (isAdm ? '\u{1F6E1}' : '\u{1F464}') + ' <strong>' + esc(j.nom) + '</strong>' + (j.clientNom ? '<br>Client : <strong>' + esc(j.clientNom) + '</strong>' : '') + '<br>Identifiant : <strong>' + esc(j.login) + '</strong><br>E-mail : <strong>' + esc(j.email) + '</strong></div>'
-      + '<p class="evrc-hint">Pour des raisons de sécurité, la réinitialisation est effectuée par l\u2019administrateur de la plateforme.</p>'
-      + '<div class="modal-actions"><a class="btn btn-primary" style="text-decoration:none" href="' + mailto + '">\u{1F4E7} Demander la réinitialisation</a> <button class="btn btn-outline" onclick="closeForgot()">Fermer</button></div>';
+    if(!j || j.error){ $('forgotStep2').innerHTML = '<p class="login-err">Serveur injoignable — réessayez plus tard.</p>'; return; }
+    $('forgotStep2').innerHTML = '<div class="forgot-found">✅ Demande enregistrée.</div>'
+      + '<p class="evrc-hint">Si ce compte existe, un e-mail contenant un mot de passe temporaire vient d’être envoyé automatiquement à l’adresse associée (vérifiez vos courriers indésirables).</p>'
+      + '<p class="evrc-hint">À votre prochaine connexion, personnalisez ce mot de passe : Mon profil → « Changer le mot de passe ».</p>'
+      + '<div class="modal-actions"><button class="btn btn-outline" onclick="closeForgot()">Fermer</button></div>';
     return;
   }
   forgotSearchLocal();
@@ -1899,14 +1898,14 @@ function applySession(){
     comp.readOnly = true;
     comp.title = "Nom de votre société (défini par le consultant)";
     if($('footerCompany')) $('footerCompany').textContent = comp.value;
-    document.title = 'SST — ' + comp.value;
+    document.title = 'VERIO';
   } else {
     const st = load(LS.settings, {});
     comp.value = st.company || '';
     comp.readOnly = false;
     comp.title = "Nom éditable, sauvegardé automatiquement";
     if($('footerCompany')) $('footerCompany').textContent = st.company || '';
-    document.title = st.company ? 'SST — ' + st.company : 'SST';
+    document.title = 'VERIO';
   }
   const cur = document.querySelector('.tab.active');
   if(cur && !can(cur.dataset.module)){
@@ -2108,6 +2107,16 @@ function manualRemind(num){
   const a = getActions().find(x => x.num === num);
   if(!a) return;
   if(!a.respEmail){ toast('⚠️ Aucun e-mail renseigné pour le responsable de ' + num + ' — modifiez l\'action pour l\'ajouter'); return; }
+  if(SB_ON && sbReady && sbTokens && sbMailOn){
+    toast('📧 Envoi du rappel à ' + (a.resp || a.respEmail) + '…');
+    sbAdminCall('notify_action', { num: num, kind: 'relance' }, 'verio-mail').then(res => {
+      if(res && res.error){ toast('⚠️ ' + res.error); return; }
+      save(LS.actions, getActions().map(x => x.num === num ? Object.assign({}, x, {relanceSent: todayISO()}) : x));
+      toast('✅ Rappel envoyé par e-mail à ' + (a.resp || a.respEmail));
+      renderActions();
+    });
+    return;
+  }
   sendActionEmail(a, true);
   save(LS.actions, getActions().map(x => x.num === num ? Object.assign({}, x, {relanceSent: todayISO()}) : x));
   toast('📧 Rappel manuel ouvert pour ' + a.resp + ' — cliquez sur « Envoyer » dans votre messagerie');
@@ -3349,7 +3358,14 @@ function openActionModal(num, linkEval, linkItem){
     save(LS.actions, list); renderActions(); toast(' Action enregistrée');
     /* clôture d'une action liée à une exigence → suggestion de mise à jour de la conformité */
     if(nowClosed && vals.linkEval) setTimeout(() => offerEvalUpdate(vals.linkEval, vals.linkItem, vals.num), 150);
-    if(creation && vals.respEmail){ sendActionEmail(vals); toast('📧 E-mail d\'attribution ouvert pour ' + vals.resp + ' — cliquez sur « Envoyer » dans votre messagerie'); }
+    if(creation && vals.respEmail){
+      if(SB_ON && sbReady && sbTokens && sbMailOn){
+        toast('📧 Attribution envoyée par e-mail à ' + vals.resp);
+        sbAdminCall('notify_action', { num: vals.num, kind: 'creation' }, 'verio-mail').then(res => { if(res && res.error) toast('⚠️ ' + res.error); });
+      } else {
+        sendActionEmail(vals); toast('📧 E-mail d\'attribution ouvert pour ' + vals.resp + ' — cliquez sur « Envoyer » dans votre messagerie');
+      }
+    }
   });
 }
 function deleteAction(num){ if(!confirmAction(`Supprimer l'action ${num} ?`)) return; save(LS.actions, getActions().filter(a=>a.num!==num)); renderActions(); toast(' Action supprimée'); }
@@ -5882,7 +5898,7 @@ function init(force){
   $('companyName').addEventListener('input', e=>{
     if(e.target.readOnly) return; // compte client : nom de société défini par le consultant
     settings.company = e.target.value; save(LS.settings, settings);
-    if($('footerCompany')) $('footerCompany').textContent = settings.company; document.title = 'SST — ' + settings.company;
+    if($('footerCompany')) $('footerCompany').textContent = settings.company; document.title = 'VERIO';
   });
   if($('footerCompany')) $('footerCompany').textContent = settings.company;
 
@@ -5924,5 +5940,5 @@ clpInit();
   if(sbReady){ sbPoll(); sbMailStatus(); }
 })();
 </script>
-<!-- script de télémétrie tiers retiré (sans objet hors ligne) --><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f9177b297ddc2f',t:'MTc5NTUzMDQxOA=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f9177b297ddc2f',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<!-- script de télémétrie tiers retiré (sans objet hors ligne) --><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f9d628aeeae3c8',t:'MTc5NTUzODIyOA=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f9d628aeeae3c8',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>

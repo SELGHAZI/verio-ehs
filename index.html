@@ -1132,7 +1132,7 @@ footer{background:#e8f0f1;color:#63777d;border-top:1px solid #dce5e7}footer stro
 
     <div class="kpi-grid" id="evrcKpi"></div>
 
-    <div class="table-wrap evrc-table-wrap"><p class="evrc-scroll-hint no-print">Faites défiler horizontalement pour parcourir les 25 colonnes de la grille.</p>
+    <div class="table-wrap evrc-table-wrap"><p class="evrc-scroll-hint no-print">Faites défiler horizontalement pour parcourir les 34 colonnes de la grille.</p>
       <table class="evrc-table">
         <thead>
           <tr>
@@ -1140,8 +1140,8 @@ footer{background:#e8f0f1;color:#63777d;border-top:1px solid #dce5e7}footer stro
             <th rowspan="2">Tâche concernée</th>
             <th rowspan="2">Substance chimique</th>
             <th rowspan="2">N° CAS</th>
-            <th colspan="2" class="grp">Identification du danger (2.2)</th>
-            <th rowspan="2">Phrase de danger</th>
+            <th colspan="2" class="grp">Classification CLP (2.2)</th>
+            <th rowspan="2">Identification du danger (2.2)</th>
             <th rowspan="2">Nature d'exposition (2.1)</th>
             <th rowspan="2">Propriétés / volatilité, T° ébullition (9.1)</th>
             <th rowspan="2">VLCT / VLLT</th>
@@ -1534,6 +1534,116 @@ footer{background:#e8f0f1;color:#63777d;border-top:1px solid #dce5e7}footer stro
 /* ---------- 1. Constantes ---------- */
 const LS = { settings:'sst_settings', dashboard:'sst_dashboard', risks:'sst_risks', compliance:'sst_compliance', actions:'sst_actions', register:'sst_register', evrc:'sst_evrc', evaluations:'sst_evaluations', clients:'sst_clients', users:'sst_users', admin:'sst_admin', session:'sst_session' };
 
+/* ---------- 2bis. MODE CLOUD (Supabase) — données centralisées ----------
+   Actif uniquement si la page est servie via http(s) : en ouverture locale
+   (file://) l'application fonctionne exactement comme avant, en localStorage. */
+const SB_URL = 'https://kklwnoiewwnyfulsjpjc.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtrbHdub2lld3dueWZ1bHNqcGpjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTU1MDUzNjgsImV4cCI6MjExMTA4MTM2OH0.pa12rlEu1O4FLDH3ENptc9VfCBy28jc_0ryVnaNtXRI';
+const SB_ON = /^https?:$/.test(location.protocol) && !!SB_URL;
+const SB_KEYS = [LS.settings, LS.dashboard, LS.risks, LS.compliance, LS.actions, LS.register, LS.evrc, LS.evaluations];
+let sbReady = false;              /* session cloud ouverte */
+let sbTokens = null;              /* jetons de session */
+let sbLastSync = {};              /* clé -> updated_at distant */
+let sbClientsSnap = [];           /* ids clients synchronisés */
+const sbTimers = {};              /* délai de debounce par clé */
+
+function sbH(){
+  const h = { apikey: SB_ANON, 'Content-Type': 'application/json' };
+  if(sbTokens) h.Authorization = 'Bearer ' + sbTokens.access_token;
+  return h;
+}
+async function sbRefresh(){
+  if(!sbTokens) return null;
+  if(sbTokens.expires_at && Date.now() < sbTokens.expires_at - 120000) return sbTokens;
+  try{
+    const r = await fetch(SB_URL + '/auth/v1/token?grant_type=refresh_token', { method:'POST', headers:{ apikey:SB_ANON, 'Content-Type':'application/json' }, body: JSON.stringify({ refresh_token: sbTokens.refresh_token }) });
+    if(!r.ok){ /* jeton périmé : session à rouvrir */ sbTokens = null; sbReady = false; localStorage.removeItem(LS.session); return null; }
+    const j = await r.json();
+    sbTokens = { access_token:j.access_token, refresh_token:j.refresh_token, expires_at: Date.now() + ((j.expires_in || 3600) * 1000) };
+    const s = load(LS.session, null); if(s){ s.sb = sbTokens; localStorage.setItem(LS.session, JSON.stringify(s)); }
+    return sbTokens;
+  }catch(e){ return sbTokens; } /* hors ligne : on conserve le jeton courant */
+}
+function sbTouch(key, val){
+  if(!SB_ON || !sbReady || !sbTokens) return;
+  if(key === LS.clients){ sbSyncClients(val); return; }
+  if(!SB_KEYS.includes(key)) return;
+  clearTimeout(sbTimers[key]);
+  sbTimers[key] = setTimeout(() => { sbPush(key, val); }, 700);
+}
+async function sbPush(key, val){
+  try{
+    await sbRefresh(); if(!sbTokens) return;
+    const r = await fetch(SB_URL + '/rest/v1/app_data', { method:'POST', headers: Object.assign(sbH(), { Prefer:'resolution=merge-duplicates' }), body: JSON.stringify({ key:key, data:val }) });
+    if(r.ok){
+      const g = await fetch(SB_URL + '/rest/v1/app_data?select=updated_at&key=eq.' + encodeURIComponent(key), { headers: sbH() });
+      if(g.ok){ const rows = await g.json(); if(rows && rows[0]) sbLastSync[key] = rows[0].updated_at; }
+    }
+  }catch(e){}
+}
+async function sbSyncClients(cls){
+  try{
+    await sbRefresh(); if(!sbTokens) return;
+    const seen = cls.map(c => String(c.id));
+    if(cls.length){
+      const r = await fetch(SB_URL + '/rest/v1/clients', { method:'POST', headers: Object.assign(sbH(), { Prefer:'resolution=merge-duplicates' }), body: JSON.stringify(cls.map(c => ({ id: String(c.id), data: c }))) });
+      if(!r.ok) return;
+    }
+    for(const id of sbClientsSnap){ if(!seen.includes(id)) await fetch(SB_URL + '/rest/v1/clients?id=eq.' + encodeURIComponent(id), { method:'DELETE', headers: sbH() }); }
+    sbClientsSnap = seen;
+  }catch(e){}
+}
+async function sbPull(){
+  if(!sbReady || !sbTokens) return;
+  await sbRefresh(); if(!sbTokens) return;
+  const r = await fetch(SB_URL + '/rest/v1/app_data?select=key,data,updated_at', { headers: sbH() });
+  if(!r.ok) throw new Error('sync');
+  const rows = await r.json();
+  const have = {}; (rows || []).forEach(x => have[x.key] = x);
+  const firstRun = !(rows || []).length && isAdmin();  /* première mise en ligne : l'admin migre ses données locales */
+  SB_KEYS.forEach(k => {
+    if(have[k]){ localStorage.setItem(k, JSON.stringify(have[k].data)); sbLastSync[k] = have[k].updated_at; }
+    else if(firstRun && localStorage.getItem(k) !== null){ sbPush(k, JSON.parse(localStorage.getItem(k))); sbLastSync[k] = new Date().toISOString(); }
+  });
+  const rc = await fetch(SB_URL + '/rest/v1/clients?select=id,data&order=id.asc', { headers: sbH() });
+  if(rc.ok){
+    const crows = await rc.json();
+    if(Array.isArray(crows) && crows.length){
+      localStorage.setItem(LS.clients, JSON.stringify(crows.map(x => x.data)));
+      sbClientsSnap = crows.map(x => String(x.id));
+    } else if(isAdmin() && localStorage.getItem(LS.clients) !== null){
+      /* ne jamais pousser le simple client de démonstration vers la base centrale */
+      const lc = JSON.parse(localStorage.getItem(LS.clients));
+      const demoSeed = lc.length === 1 && lc[0].id === 'c1' && /démo/i.test(String(lc[0].nom || ''));
+      if(!demoSeed) sbSyncClients(lc);
+    }
+  }
+}
+function sbPoll(){
+  setInterval(async () => {
+    if(!sbReady || !sbTokens || document.visibilityState !== 'visible') return;
+    try{
+      const t = await sbRefresh();
+      if(!t) return;
+      const keys = SB_KEYS.concat([LS.clients]);
+      const before = keys.map(k => localStorage.getItem(k) || '').join('\u0001');
+      await sbPull();
+      const after = keys.map(k => localStorage.getItem(k) || '').join('\u0001');
+      if(before !== after) renderAll();
+    }catch(e){}
+  }, 30000);
+}
+async function sbAdminCall(action, payload){
+  try{
+    await sbRefresh(); if(!sbTokens) return { error: 'Session expirée — reconnectez-vous.' };
+    const r = await fetch(SB_URL + '/functions/v1/verio-admin', { method:'POST', headers: sbH(), body: JSON.stringify(Object.assign({ action: action }, payload || {})) });
+    const j = await r.json().catch(() => ({}));
+    if(!r.ok) return { error: j.error || ('Erreur ' + r.status) };
+    return j;
+  }catch(e){ return { error: 'Serveur injoignable.' }; }
+}
+
+
 /* ================= ACCÈS : SAS, RÔLES, CLIENTS & MODULES SOUSCRITS ================= */
 function getClients(){ return load(LS.clients, []); }
 function getClientById(id){ return getClients().find(c => c.id === id) || null; }
@@ -1579,7 +1689,41 @@ function requireAdmin(){
   toast("⛔ Fonction réservée au compte administrateur (consultant)");
   return false;
 }
-function login(){
+async function login(){
+  const lg = String($('loginUser').value || '').trim();
+  const pw = String($('loginPass').value || '');
+  const err = $('loginErr');
+  if(SB_ON){
+    const btn = document.querySelector('#loginOverlay .btn-primary');
+    if(btn) btn.disabled = true;
+    let j = null, ok = false;
+    try{
+      const r = await fetch(SB_URL + '/functions/v1/verio-login', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'login', login: lg, password: pw }) });
+      j = await r.json().catch(() => ({}));
+      ok = r.ok;
+    }catch(e){ ok = false; j = null; }
+    if(btn) btn.disabled = false;
+    if(!ok){
+      err.textContent = j && j.error ? j.error : 'Serveur injoignable — vérifiez votre connexion Internet.';
+      err.style.display = ''; $('loginPass').value = '';
+      return;
+    }
+    sbTokens = { access_token: j.session.access_token, refresh_token: j.session.refresh_token, expires_at: Date.now() + ((j.session.expires_in || 3600) * 1000) };
+    sbReady = true;
+    const prof = j.profile;
+    save(LS.session, { role: prof.role === 'admin' ? 'admin' : 'user', clientId: prof.clientId || null, userId: prof.localId || null, nom: prof.nom, login: prof.login, sb: sbTokens });
+    $('loginPass').value = ''; err.style.display = 'none';
+    try{ await sbPull(); }catch(e){}
+    applySession();
+    renderAll();
+    $('loginOverlay').classList.remove('open');
+    toast(isAdmin() ? "\u{1F6E1} Session administrateur ouverte \u2601 données centralisées" : "\u{1F464} Bienvenue, " + getSession().nom + " \u2014 vous accédez à la plateforme de votre client");
+    sbPoll();
+    return;
+  }
+  loginLocal();
+}
+function loginLocal(){
   const lg = String($('loginUser').value || '').trim();
   const pw = String($('loginPass').value || '');
   const err = $('loginErr');
@@ -1607,7 +1751,30 @@ function login(){
 let forgotTarget = null; // { kind:'admin' } | { kind:'user', clientId, userId }
 function openForgot(){ $('forgotId').value = ''; $('forgotStep1').style.display = ''; $('forgotStep2').style.display = 'none'; $('forgotOverlay').classList.add('open'); setTimeout(() => $('forgotId').focus(), 50); }
 function closeForgot(){ $('forgotOverlay').classList.remove('open'); forgotTarget = null; }
-function forgotSearch(){
+async function forgotSearch(){
+  const q = String($('forgotId').value || '').trim().toLowerCase();
+  if(!q) return;
+  forgotTarget = null;
+  if(SB_ON){
+    let j = null;
+    try{
+      const r = await fetch(SB_URL + '/functions/v1/verio-login', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'lookup', login:q }) });
+      j = await r.json().catch(() => ({}));
+    }catch(e){ j = null; }
+    $('forgotStep1').style.display = 'none';
+    $('forgotStep2').style.display = '';
+    if(!j || typeof j.found === 'undefined'){ $('forgotStep2').innerHTML = '<p class="login-err">Serveur injoignable \u2014 réessayez plus tard.</p>'; return; }
+    if(!j.found){ $('forgotStep2').innerHTML = '<p class="login-err">Aucun compte ne correspond à \u00ab ' + esc(q) + ' \u00bb. Contactez votre consultant.</p>'; return; }
+    const isAdm = j.kind === 'admin';
+    const mailto = 'mailto:admin@verio.app?subject=' + encodeURIComponent('Réinitialisation de mot de passe \u2014 plateforme EHS') + '&body=' + encodeURIComponent('Bonjour,\n\nJe souhaite réinitialiser le mot de passe du compte \u00ab ' + j.login + ' \u00bb.\n\nCordialement.');
+    $('forgotStep2').innerHTML = '<div class="forgot-found">' + (isAdm ? '\u{1F6E1}' : '\u{1F464}') + ' <strong>' + esc(j.nom) + '</strong>' + (j.clientNom ? '<br>Client : <strong>' + esc(j.clientNom) + '</strong>' : '') + '<br>Identifiant : <strong>' + esc(j.login) + '</strong><br>E-mail : <strong>' + esc(j.email) + '</strong></div>'
+      + '<p class="evrc-hint">Pour des raisons de sécurité, la réinitialisation est effectuée par l\u2019administrateur de la plateforme.</p>'
+      + '<div class="modal-actions"><a class="btn btn-primary" style="text-decoration:none" href="' + mailto + '">\u{1F4E7} Demander la réinitialisation</a> <button class="btn btn-outline" onclick="closeForgot()">Fermer</button></div>';
+    return;
+  }
+  forgotSearchLocal();
+}
+function forgotSearchLocal(){
   const q = String($('forgotId').value || '').trim().toLowerCase();
   if(!q) return;
   forgotTarget = null;
@@ -1663,6 +1830,12 @@ function forgotReset(){
 }
 
 function logout(){
+  if(SB_ON && sbTokens){
+    try{ fetch(SB_URL + '/auth/v1/logout', { method:'POST', headers: sbH() }); }catch(e){}
+    /* poste partagé : on ne laisse pas les données en cache dans le navigateur */
+    SB_KEYS.concat([LS.clients]).forEach(k => localStorage.removeItem(k));
+  }
+  sbReady = false; sbTokens = null; sbLastSync = {}; sbClientsSnap = [];
   localStorage.removeItem(LS.session);
   /* fermer toutes les fenêtres ouvertes (Mon profil, configuration, évaluations…) */
   document.querySelectorAll('.modal-overlay.open').forEach(o => { if(o.id !== 'loginOverlay') o.classList.remove('open'); });
@@ -1796,7 +1969,7 @@ function demoData(){
 
 /* ---------- 3. Utilitaires ---------- */
 function load(key, fallback){ try{ const v=localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } }
-function save(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
+function save(key, val){ localStorage.setItem(key, JSON.stringify(val)); sbTouch(key, val); }
 function toast(msg){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2600); }
 function confirmAction(msg){ return window.confirm(msg); }
 
@@ -4583,7 +4756,7 @@ function renderEvrc(){
     const st = evrcStatut(r);
     const cell = k => {
       const o = c[k];
-      return `<td class="evrc-cot">
+      return `<td class="evrc-cot" colspan="4">
         <span class="evrc-triplet">E ${evrcFmt(o.E)} · G ${evrcFmt(o.G)} · P ${evrcFmt(o.P)}</span>
         <span class="badge ${evrcPrioClass(o.R)}">R = ${evrcFmt(o.R)} — ${evrcPrioLabel(o.R)}</span>
       </td>`;
@@ -4621,7 +4794,7 @@ function renderEvrc(){
         <button class="btn btn-sm btn-del" onclick="deleteEvrc('${esc(r.id)}')">Suppr.</button>
       </td>
     </tr>`;
-  }).join('') : `<tr class="empty-row"><td colspan="25">Aucune substance évaluée. Utilisez « Ajouter une ligne », « Modèle d’import » ou « Importer une grille ».</td></tr>`;
+  }).join('') : `<tr class="empty-row"><td colspan="34">Aucune substance évaluée. Utilisez « Ajouter une ligne », « Modèle d’import » ou « Importer une grille ».</td></tr>`;
 
   renderEvrcSynth(list);
 }
@@ -5476,6 +5649,11 @@ function saveClient(){
     cls.push({ id, nom, adresse:$('clAdresse').value.trim(), ville:$('clVille').value.trim(), tel:$('clTel').value.trim(), mail,
       modules, regAll, regTextes, domains, regStatuts,
       users:[{ id:'u1', prenom:'Compte', nom:'principal', email:mail, login, mdp, lastLogin:'' }] });
+    if(SB_ON && sbReady && sbTokens){
+      const mailAuth = mail || (login + '@client.verio.app');
+      sbAdminCall('create_user', { clientId:id, localId:'u1', prenom:'Compte', nom:'principal', email:mailAuth, login:login, password:mdp })
+        .then(res => { if(res && res.error) toast('⚠️ ' + res.error); });
+    }
     save(LS.clients, cls); renderClients(); closeClientModal();
     openUsersModal(id);
     toast("💾 Client créé — " + nom + " · compte principal : " + login + " / " + mdp + " (identifiant = nom de la société, modifiable)");
@@ -5486,6 +5664,7 @@ function saveClient(){
 function deleteClient(id){
   const cls = getClients(); const c = cls.find(x => x.id === id); if(!c) return;
   if(!confirmAction("Supprimer le client « " + c.nom + " » et ses " + (c.users || []).length + " utilisateur(s) ?")) return;
+  if(SB_ON && sbReady && sbTokens){ sbAdminCall('purge_client', { clientId:id }).then(res => { if(res && res.error) toast('⚠️ ' + res.error); }); }
   save(LS.clients, cls.filter(x => x.id !== id));
   if(getSession() && getSession().clientId === id) logout();
   renderClients(); toast(" Client supprimé");
@@ -5546,6 +5725,11 @@ function saveUser(){
     c.users.push({ id:'u' + n, prenom, nom, email:mail, login:lg, mdp:pw, lastLogin:'' });
     toast("💾 Accès créé — " + prenom + " " + nom);
   }
+  if(SB_ON && sbReady && sbTokens){
+    const newId = c.users.length ? c.users[c.users.length - 1].id : '';
+    sbAdminCall(editingUserId ? 'update_user' : 'create_user', { clientId:c.id, localId:(editingUserId || newId), prenom:prenom, nom:nom, email:mail, login:lg, password:pw })
+      .then(res => { if(res && res.error) toast('⚠️ ' + res.error); });
+  }
   save(LS.clients, cls); renderClientUsers(); closeUserModal();
 }
 function deleteUser(id){
@@ -5555,6 +5739,7 @@ function deleteUser(id){
   const u = (c.users || []).find(x => x.id === id); if(!u) return;
   if(!confirmAction("Supprimer l'accès de " + ((u.prenom || '') + ' ' + (u.nom || '')).trim() + " ?")) return;
   c.users = c.users.filter(x => x.id !== id);
+  if(SB_ON && sbReady && sbTokens){ sbAdminCall('delete_user', { clientId:c.id, localId:id }).then(res => { if(res && res.error) toast('⚠️ ' + res.error); }); }
   save(LS.clients, cls);
   if(getSession() && getSession().clientId === c.id && getSession().userId === id) logout();
   renderClientUsers(); toast(" Accès supprimé");
@@ -5566,6 +5751,21 @@ function changeAdminPassword(){
     { key:'new', label:'Nouveau mot de passe', type:'password', value:'', required:true },
     { key:'confirm', label:'Confirmation', type:'password', value:'', required:true },
   ], vals => {
+    if(SB_ON){
+      if((vals.new || '').length < 6){ toast("⚠️ Le nouveau mot de passe doit contenir au moins 6 caractères"); return; }
+      if(vals.new !== vals.confirm){ toast("⚠️ La confirmation ne correspond pas"); return; }
+      const lg = getSession() ? getSession().login : 'admin';
+      fetch(SB_URL + '/functions/v1/verio-login', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'login', login:lg, password:vals.old }) })
+        .then(r => r.json().catch(() => ({})))
+        .then(async j => {
+          if(!j || !j.session){ toast("⚠️ Mot de passe actuel incorrect"); return; }
+          await sbRefresh();
+          const r2 = await fetch(SB_URL + '/auth/v1/user', { method:'PUT', headers: sbH(), body: JSON.stringify({ password: vals.new }) });
+          toast(r2.ok ? "🔑 Mot de passe administrateur modifié" : "⚠️ Modification impossible");
+        })
+        .catch(() => toast("⚠️ Serveur injoignable"));
+      return;
+    }
     if(vals.old !== adm.mdp){ toast("⚠️ Mot de passe actuel incorrect"); return; }
     if((vals.new || '').length < 4){ toast("⚠️ Le nouveau mot de passe doit contenir au moins 4 caractères"); return; }
     if(vals.new !== vals.confirm){ toast("⚠️ La confirmation ne correspond pas"); return; }
@@ -5637,7 +5837,20 @@ function init(force){
   window.addEventListener('resize', () => renderModuleCharts()); // graphiques modules responsives
 }
 clpInit();
-init(false);
+(async function(){
+  if(SB_ON){
+    const s = load(LS.session, null);
+    if(s && s.sb && s.sb.access_token){
+      sbTokens = s.sb;
+      try{
+        const t = await sbRefresh();
+        if(t){ sbReady = true; try{ await sbPull(); }catch(e){} }
+      }catch(e){ sbReady = true; } /* hors ligne : on travaille sur le miroir local */
+    }
+  }
+  init(false);
+  if(sbReady) sbPoll();
+})();
 </script>
-<!-- script de télémétrie tiers retiré (sans objet hors ligne) --><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f765620c6db3a4',t:'MTc5NTUxMjYzNw=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f765620c6db3a4',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<!-- script de télémétrie tiers retiré (sans objet hors ligne) --><script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a5f82d834f8f2134',t:'MTc5NTUyMDgzNQ=='};var l=window.parent.location,o;try{o=new URL(l.origin).origin}catch(e){try{o=new URL(new URL(l.href).origin).origin}catch(e){o=''}}var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a5f82d834f8f2134',a=document.createElement('script');a.src=o?new URL(u,o).href:u;document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
